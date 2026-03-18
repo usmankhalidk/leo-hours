@@ -55,9 +55,11 @@ export default function HomeScreen() {
   } | null>(null);
   const [unreadNotificationCount, setUnreadNotificationCount] = useState(0);
   const [showImagePreview, setShowImagePreview] = useState(false);
-  const [showReasonModal, setShowReasonModal] = useState(false);
-  const [attendanceReason, setAttendanceReason] = useState('');
-  const [pendingAttendanceAction, setPendingAttendanceAction] = useState<'CHECK_IN' | 'CHECK_OUT' | null>(null);
+  const [showBreakReasonModal, setShowBreakReasonModal] = useState(false);
+  const [breakReason, setBreakReason] = useState('');
+  const [breakLoading, setBreakLoading] = useState(false);
+  const [attendanceId, setAttendanceId] = useState<string | null>(null);
+  const [isBreakActive, setIsBreakActive] = useState(false);
   const [imageError, setImageError] = useState(false);
   const [attendanceMessage, setAttendanceMessage] = useState<string | null>(null);
   const [attendanceStatus, setAttendanceStatus] = useState<string | null>(null);
@@ -191,7 +193,7 @@ export default function HomeScreen() {
       // Update immediately first
       const updateWorkedTime = () => {
         const now = new Date();
-        const diffMs = now.getTime() - checkInTimestamp.getTime();
+        const diffMs = Math.max(0, now.getTime() - checkInTimestamp.getTime());
         const hours = Math.floor(diffMs / (1000 * 60 * 60));
         const minutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
         setWorkedTime(`${hours}h ${minutes}m`);
@@ -265,11 +267,22 @@ export default function HomeScreen() {
 
   const loadDashboardState = async () => {
     try {
-      const currentDate = new Date();
-      // Format as YYYY-MM-DD
-      const dateStr = currentDate.toISOString().split('T')[0];
+      const now = new Date();
+      const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+      const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
 
-      const response = await AttendanceAPI.dashboardState({ from: dateStr, to: dateStr });
+      const formatLocalDate = (date: Date) => {
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+      };
+
+      const response = await AttendanceAPI.dashboardState({
+        from: formatLocalDate(firstDayOfMonth),
+        to: formatLocalDate(lastDayOfMonth),
+      });
+
       if (response.isSuccess && response.data) {
         const getVal = (name: string) => response.data.find(i => i.name === name)?.value || 0;
         setEmployeeStats({
@@ -290,11 +303,21 @@ export default function HomeScreen() {
       const response = await AttendanceAPI.getMyStatus();
 
       if (response.isSuccess && response.data) {
-        const { timeIn, timeOut, message, status, isAllowToMark: allowMark } = response.data;
+        const {
+          attendanceId: currentAttendanceId,
+          timeIn,
+          timeOut,
+          message,
+          status,
+          isAllowToMark: allowMark,
+          isBreakActive: breakActive,
+        } = response.data;
         
         setAttendanceMessage(message);
         setAttendanceStatus(status);
         setIsAllowToMark(allowMark !== false); // Default to true if missing
+        setAttendanceId(currentAttendanceId || null);
+        setIsBreakActive(!!breakActive);
 
         // Sync the UI state with backend status
         const isCurrentlyCheckedIn = !!(timeIn && !timeOut);
@@ -355,6 +378,68 @@ export default function HomeScreen() {
     
     // Directly process attendance without reason modal
     processAttendance();
+  };
+
+  const handleBreakToggleRequest = async (reason: string) => {
+    let targetAttendanceId = attendanceId;
+
+    if (!targetAttendanceId) {
+      const latestStatus = await AttendanceAPI.getMyStatus();
+      if (latestStatus.isSuccess && latestStatus.data?.attendanceId) {
+        targetAttendanceId = latestStatus.data.attendanceId;
+        setAttendanceId(targetAttendanceId);
+      }
+    }
+
+    if (!targetAttendanceId) {
+      SnackbarService.showError('Attendance session not found. Please check in first.');
+      return;
+    }
+
+    setBreakLoading(true);
+    try {
+      const response = await AttendanceAPI.toggleBreak({
+        attendanceId: targetAttendanceId,
+        reason,
+      });
+
+      if (response.isSuccess) {
+        SnackbarService.showSuccess(response.message || (isBreakActive ? 'Break ended successfully' : 'Break started successfully'));
+        setShowBreakReasonModal(false);
+        setBreakReason('');
+        await syncAttendanceStatus();
+      } else {
+        SnackbarService.showError(response.message || 'Failed to update break status');
+      }
+    } catch (error: any) {
+      ErrorHandler.showError(error);
+    } finally {
+      setBreakLoading(false);
+    }
+  };
+
+  const handleBreakTogglePress = () => {
+    if (!isCheckedIn) {
+      SnackbarService.showError('Please check in first to use break.');
+      return;
+    }
+
+    if (isBreakActive) {
+      handleBreakToggleRequest('');
+      return;
+    }
+
+    setShowBreakReasonModal(true);
+  };
+
+  const handleBreakStartConfirm = () => {
+    const trimmedReason = breakReason.trim();
+    if (!trimmedReason) {
+      SnackbarService.showError('Please enter break reason');
+      return;
+    }
+
+    handleBreakToggleRequest(trimmedReason);
   };
 
   const processAttendance = async () => {
@@ -542,6 +627,48 @@ export default function HomeScreen() {
           }
         ]}>
           <View style={styles.mainAttendanceCard}>
+            <View style={styles.cardHeaderRow}>
+              <View style={styles.cardHeaderLeft}>
+                <Text style={styles.cardHeaderLabel}>Status</Text>
+                <Text
+                  style={[
+                    styles.cardHeaderStatus,
+                    {
+                      color: attendanceStatus?.toLowerCase() === 'ontime'
+                        ? '#047857'
+                        : attendanceStatus?.toLowerCase() === 'late'
+                          ? '#B45309'
+                          : '#64748B',
+                    },
+                  ]}
+                >
+                  {(attendanceStatus || 'Not Marked').toUpperCase()}
+                </Text>
+              </View>
+
+              {isCheckedIn && (
+                <TouchableOpacity
+                  style={[
+                    styles.breakHeaderButton,
+                    isBreakActive ? styles.breakHeaderButtonActive : styles.breakHeaderButtonInactive,
+                    (breakLoading || syncLoading || loading) && styles.breakButtonDisabled,
+                  ]}
+                  onPress={handleBreakTogglePress}
+                  activeOpacity={0.85}
+                  disabled={breakLoading || syncLoading || loading}
+                >
+                  {breakLoading ? (
+                    <ActivityIndicator size="small" color="#FFFFFF" />
+                  ) : (
+                    <Coffee size={14} color="#FFFFFF" />
+                  )}
+                  <Text style={styles.breakHeaderButtonText}>{isBreakActive ? 'End Break' : 'Start Break'}</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+
+            <View style={styles.cardHeaderDivider} />
+
             <View style={styles.cardInternalLayout}>
               {/* Left Column: Stats */}
               <View style={styles.cardLeftCol}>
@@ -607,19 +734,6 @@ export default function HomeScreen() {
               </View>
             )}
           </View>
-
-          {/* Status Badge (Placed outside main card to prevent clipping on Android) */}
-          {attendanceStatus && (
-            <View style={styles.statusBadgeContainer}>
-              <View style={[styles.statusBadge, { 
-                backgroundColor: attendanceStatus.toLowerCase() === 'ontime' ? '#D1FAE5' : '#FEF3C7', 
-                borderColor: attendanceStatus.toLowerCase() === 'ontime' ? '#10B981' : '#F59E0B' 
-              }]}>
-                <View style={[styles.statusDot, { backgroundColor: attendanceStatus.toLowerCase() === 'ontime' ? '#10B981' : '#F59E0B' }]} />
-                <Text style={[styles.statusBadgeText, { color: attendanceStatus.toLowerCase() === 'ontime' ? '#047857' : '#B45309' }]}>{attendanceStatus}</Text>
-              </View>
-            </View>
-          )}
         </Animated.View>
 
         {/* Quick Help / Manual Request Card */}
@@ -727,59 +841,61 @@ export default function HomeScreen() {
         onClose={() => setShowImagePreview(false)}
       />
 
-      {/* Reason Input Modal */}
-      {/* <Modal
-        visible={showReasonModal}
+      {/* Break Reason Modal */}
+      <Modal
+        visible={showBreakReasonModal}
         transparent
         animationType="fade"
-        onRequestClose={() => setShowReasonModal(false)}
+        onRequestClose={() => setShowBreakReasonModal(false)}
       >
         <View style={styles.modalOverlay}>
           <View style={styles.reasonModalContainer}>
-            <Text style={styles.reasonModalTitle}>
-              {pendingAttendanceAction === 'CHECK_IN' ? 'Check In Reason' : 'Check Out Reason'}
-            </Text>
+            <Text style={styles.reasonModalTitle}>Start Break</Text>
             <Text style={styles.reasonModalSubtitle}>
-              Please provide a reason for {pendingAttendanceAction === 'CHECK_IN' ? 'checking in' : 'checking out'}
+              Please provide a reason for your break
             </Text>
             
             <TextInput
               style={styles.reasonInput}
-              placeholder="Enter reason here..."
+              placeholder="Enter break reason..."
               placeholderTextColor="#94A3B8"
-              value={attendanceReason}
-              onChangeText={setAttendanceReason}
+              value={breakReason}
+              onChangeText={setBreakReason}
               multiline
               numberOfLines={4}
               textAlignVertical="top"
               autoFocus
+              editable={!breakLoading}
             />
             
             <View style={styles.reasonModalButtons}>
               <TouchableOpacity
                 style={[styles.reasonModalButton, styles.reasonCancelButton]}
                 onPress={() => {
-                  setShowReasonModal(false);
-                  setAttendanceReason('');
-                  setPendingAttendanceAction(null);
+                  if (breakLoading) return;
+                  setShowBreakReasonModal(false);
+                  setBreakReason('');
                 }}
+                disabled={breakLoading}
               >
                 <Text style={styles.reasonCancelButtonText}>Cancel</Text>
               </TouchableOpacity>
               
               <TouchableOpacity
                 style={[styles.reasonModalButton, styles.reasonSubmitButton]}
-                onPress={processAttendance}
-                disabled={!attendanceReason.trim()}
+                onPress={handleBreakStartConfirm}
+                disabled={!breakReason.trim() || breakLoading}
               >
-                <Text style={styles.reasonSubmitButtonText}>
-                  {pendingAttendanceAction === 'CHECK_IN' ? 'Check In' : 'Check Out'}
-                </Text>
+                {breakLoading ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.reasonSubmitButtonText}>Start Break</Text>
+                )}
               </TouchableOpacity>
             </View>
           </View>
         </View>
-      </Modal> */}
+      </Modal>
 
     </SafeAreaView>
   );
@@ -847,6 +963,64 @@ const styles = StyleSheet.create({
   activeTabButton: { backgroundColor: '#5B4BFF', shadowColor: '#5B4BFF', shadowOpacity: 0.3, shadowRadius: 8, elevation: 4 },
   tabText: { fontSize: 14, fontWeight: '600', color: '#64748B' },
   activeTabText: { color: '#FFFFFF' },
+
+  breakHeaderButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    borderRadius: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.14,
+    shadowRadius: 6,
+    elevation: 3,
+  },
+  breakHeaderButtonInactive: {
+    backgroundColor: '#5B4BFF',
+    shadowColor: '#5B4BFF',
+  },
+  breakHeaderButtonActive: {
+    backgroundColor: '#F59E0B',
+    shadowColor: '#F59E0B',
+  },
+  breakButtonDisabled: {
+    opacity: 0.45,
+  },
+  breakHeaderButtonText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+
+  cardHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  cardHeaderLeft: {
+    flexDirection: 'column',
+  },
+  cardHeaderLabel: {
+    fontSize: 12,
+    color: '#94A3B8',
+    fontWeight: '700',
+    marginBottom: 2,
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  cardHeaderStatus: {
+    fontSize: 14,
+    fontWeight: '800',
+    letterSpacing: 0.4,
+  },
+  cardHeaderDivider: {
+    height: 1,
+    backgroundColor: '#F1F5F9',
+    marginBottom: 16,
+  },
 
   attendanceCardWrapper: {
     marginHorizontal: 24,

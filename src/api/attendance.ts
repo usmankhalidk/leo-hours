@@ -265,6 +265,24 @@ export interface CheckStatusResponse extends ApiResponse {
   };
 }
 
+export interface BreakTogglePayload {
+  attendanceId: string;
+  reason: string;
+}
+
+export interface BreakToggleResponse extends ApiResponse {
+  data: {
+    attendanceId: string;
+    startTime?: string;
+    endTime?: string;
+    duration: number;
+    reason: string;
+    _id: string;
+    createdAt: string;
+    updatedAt: string;
+  };
+}
+
 export const AttendanceAPI = {
   checkStatus: async (): Promise<CheckStatusResponse> => {
     try {
@@ -518,6 +536,15 @@ export const AttendanceAPI = {
   getMyStatus: async (): Promise<TodayAttendanceStatusResponse> => {
     try {
       const res = await apiClient.get('/getMyStatus');
+      return res.data;
+    } catch (error: any) {
+      throw error;
+    }
+  },
+
+  toggleBreak: async (payload: BreakTogglePayload): Promise<BreakToggleResponse> => {
+    try {
+      const res = await rootApiClient.post('/attendance-breaks/break-toggle', payload);
       return res.data;
     } catch (error: any) {
       throw error;

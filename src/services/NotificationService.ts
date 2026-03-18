@@ -121,16 +121,10 @@ class NotificationServiceClass {
         return;
       }
 
-      // Get user data to send user ID explicitly
-      const userData = await StorageService.getUserData();
-      if (!userData) {
-        return;
-      }
-
-      const API_URL = `${config.API.BASE_URL}/attendance-api/user/updateFcmToken`;
+      const API_URL = `${config.API.BASE_URL}/api/users/update-fcm-token`;
 
       const payload = {
-        "fcm_token": token
+        fcmToken: token,
       };
 
       const response = await axios.post(
